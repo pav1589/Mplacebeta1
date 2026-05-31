@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Mars Place — чистый холст</title>
+    <style>
+        * {
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        body {
+            margin: 0;
+            background: #0a0a1a;
+            overflow: hidden;
+            font-family: system-ui;
+        }
+        #canvas-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: none;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            image-rendering: crisp-edges;
+            image-rendering: pixelated;
+            will-change: transform;
+        }
+        /* Меню — прячется вниз */
+        .menu-wrapper {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+            transition: transform 0.3s ease;
+            transform: translateY(0);
+        }
+        .menu-wrapper.collapsed {
+            transform: translateY(calc(100% - 48px));
+        }
+        .menu-handle {
+            background: rgba(0,0,0,0.85);
+            backdrop-filter: blur(10px);
+            border-top-left-radius: 24px;
+            border-top-right-radius: 24px;
+            display: flex;
+            justify-content: center;
+            padding: 8px 0;
+            cursor: pointer;
+            border-top: 1px solid #4a4a6a;
+        }
+        .menu-handle span {
+            font-size: 28px;
+            color: white;
+            font-weight: bold;
+        }
+        .toolbar {
+            background: rgba(0,0,0,0.9);
+            backdrop-filter: blur(12px);
+            padding: 12px;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 8px;
+            border-top: 1px solid #2a2a44;
+            max-height: 38vh;
+            overflow-y: auto;
+        }
+        button {
+            background: #2c2c44;
+            border: none;
+            color: white;
+            padding: 8px 14px;
+            border-radius: 40px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:active { transform: scale(0.96); }
+        .color-btn {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            border: 2px solid white;
+            cursor: pointer;
+        }
+        #currentColorBox {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 2px solid white;
+        }
+        .coords {
+            background: #000000aa;
+            padding: 6px 12px;
+            border-radius: 40px;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        @media (max-width: 700px) {
+            button { padding: 6px 12px; font-size: 12px; }
+            .color-btn { width: 38px; height: 38px; }
+        }
+    </style>
+</head>
+<body>
+<div id="canvas-container">
+    <canvas id="marsCanvas"></canvas>
+</div>
+
+<div class="menu-wrapper" id="menuWrapper">
+    <div class="menu-handle" id="menuHandle">
+        <span>▲</span>
+    </div>
+    <div class="toolbar" id="toolbar">
+        <div id="currentColorBox" style="background:#ff0000;"></div>
+        <input type="color" id="colorPicker" value="#ff0000">
+        <div id="palette" style="display:flex; gap:5px; flex-wrap:wrap;"></div>
+        <button id="zoomInBtn">🔍 +</button>
+        <button id="zoomOutBtn">🔍 -</button>
+        <button id="resetViewBtn">⟳ Центр</button>
+        <button id="clearMyPixelsBtn">🗑 Стереть мои</button>
+        <div class="coords" id="coords">X:0 Y:0</div>
+    </div>
+</div>
+
+<script>
+    (function(){
+        // === РАЗМЕРЫ ===
+        const MAP_SIZE = 1000;
+        const VIEW_SIZE = 800;
+
+        const canvas = document.getElementById('marsCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('canvas-container');
+
+        // Камера
+        let offsetX = 0, offsetY = 0;
+        let scale = 1;
+        let isDragging = false;
+        let dragStart = { x: 0, y: 0 };
+        let lastTouchDist = 0;
+
+        // Данные
+        let pixels = new Map();
+        let myPixelKeys = new Set();
+
+        let currentColor = '#ff0000';
+
+        // === МЕНЮ (сворачивание в самый низ) ===
+        const menuWrapper = document.getElementById('menuWrapper');
+        document.getElementById('menuHandle').addEventListener('click', () => {
+            menuWrapper.classList.toggle('collapsed');
+        });
+
+        // === ХОЛСТ ===
+        function resizeCanvas() {
+            const rect = container.getBoundingClientRect();
+            canvas.width = VIEW_SIZE;
+            canvas.height = VIEW_SIZE;
+            canvas.style.width = `${VIEW_SIZE}px`;
+            canvas.style.height = `${VIEW_SIZE}px`;
+            drawFullCanvas();
+        }
+
+        function buildPalette() {
+            const paletteDiv = document.getElementById('palette');
+            const colors = ['#ff0000','#00ff00','#0000ff','#ffff00','#ff00ff','#00ffff','#ffffff','#000000','#ff8800','#8800ff','#888888','#ff44aa'];
+            paletteDiv.innerHTML = '';
+            for (let col of colors) {
+                const btn = document.createElement('div');
+                btn.className = 'color-btn';
+                btn.style.backgroundColor = col;
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    currentColor = col;
+                    document.getElementById('currentColorBox').style.backgroundColor = currentColor;
+                    document.getElementById('colorPicker').value = currentColor;
+                };
+                paletteDiv.appendChild(btn);
+            }
+        }
+
+        // === ЛОГИКА ПИКСЕЛЕЙ ===
+        function setPixel(x, y, color, isMyAction = true) {
+            if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) return;
+            const key = `${x},${y}`;
+            const existing = pixels.get(key);
+            if (color === '#ffffff' && existing && !myPixelKeys.has(key)) return;
+            if (color === '#ffffff') {
+                pixels.delete(key);
+                myPixelKeys.delete(key);
+            } else {
+                pixels.set(key, color);
+                if (isMyAction) myPixelKeys.add(key);
+            }
+            drawSinglePixel(x, y);
+            saveToLocalStorage();
+        }
+
+        function drawSinglePixel(x, y) {
+            const col = pixels.get(`${x},${y}`) || '#ffffff';
+            const sx = (x + offsetX) * scale;
+            const sy = (y + offsetY) * scale;
+            const sz = Math.max(1, Math.floor(scale));
+            ctx.fillStyle = col;
+            ctx.fillRect(sx, sy, sz, sz);
+        }
+
+        function drawFullCanvas() {
+            if (!ctx) return;
+            ctx.clearRect(0, 0, VIEW_SIZE, VIEW_SIZE);
+            ctx.fillStyle = '#e0e0e0';
+            ctx.fillRect(0, 0, VIEW_SIZE, VIEW_SIZE);
+
+            const startX = Math.max(0, Math.floor(-offsetX / scale));
+            const startY = Math.max(0, Math.floor(-offsetY / scale));
+            const endX = Math.min(MAP_SIZE, startX + Math.ceil(VIEW_SIZE / scale));
+            const endY = Math.min(MAP_SIZE, startY + Math.ceil(VIEW_SIZE / scale));
+
+            const ps = Math.max(1, scale);
+            for (let y = startY; y < endY; y++) {
+                for (let x = startX; x < endX; x++) {
+                    const col = pixels.get(`${x},${y}`) || '#ffffff';
+                    const sx = (x + offsetX) * scale;
+                    const sy = (y + offsetY) * scale;
+                    ctx.fillStyle = col;
+                    ctx.fillRect(sx, sy, ps, ps);
+                }
+            }
+        }
+
+        function screenToWorld(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const mx = (clientX - rect.left);
+            const my = (clientY - rect.top);
+            let wx = Math.floor((mx / scale) - offsetX);
+            let wy = Math.floor((my / scale) - offsetY);
+            wx = Math.min(MAP_SIZE-1, Math.max(0, wx));
+            wy = Math.min(MAP_SIZE-1, Math.max(0, wy));
+            return { x: wx, y: wy };
+        }
+
+        function drawAtScreen(clientX, clientY) {
+            const { x, y } = screenToWorld(clientX, clientY);
+            setPixel(x, y, currentColor, true);
+            document.getElementById('coords').innerText = `X:${x} Y:${y}`;
+        }
+
+        // === СОХРАНЕНИЕ ===
+        function saveToLocalStorage() {
+            try {
+                const data = {
+                    mapSize: MAP_SIZE,
+                    pixels: Array.from(pixels.entries()),
+                    myPixels: Array.from(myPixelKeys)
+                };
+                localStorage.setItem('marsPlaceCanvas', JSON.stringify(data));
+            } catch(e) {}
+        }
+
+        function loadFromLocalStorage() {
+            const raw = localStorage.getItem('marsPlaceCanvas');
+            if (!raw) return;
+            try {
+                const data = JSON.parse(raw);
+                if (data.mapSize === MAP_SIZE && Array.isArray(data.pixels)) {
+                    pixels = new Map(data.pixels);
+                    myPixelKeys = new Set(data.myPixels || []);
+                    drawFullCanvas();
+                }
+            } catch(e) {}
+        }
+
+        function clearMyPixels() {
+            if (confirm('Стереть ТОЛЬКО твои пиксели?')) {
+                for (let key of myPixelKeys) pixels.delete(key);
+                myPixelKeys.clear();
+                drawFullCanvas();
+                saveToLocalStorage();
+            }
+        }
+
+        // === СОБЫТИЯ (РИСОВАНИЕ, ПЕРЕМЕЩЕНИЕ, ЗУМ) ===
+        function attachEvents() {
+            let drawing = false;
+
+            // Мышь: рисование по клику, перемещение правой кнопкой
+            canvas.addEventListener('mousedown', (e) => {
+                if (e.button === 0) {  // левая кнопка — рисование
+                    drawing = true;
+                    drawAtScreen(e.clientX, e.clientY);
+                    e.preventDefault();
+                } else if (e.button === 2) { // правая — перемещение
+                    isDragging = true;
+                    dragStart.x = e.clientX - offsetX;
+                    dragStart.y = e.clientY - offsetY;
+                    e.preventDefault();
+                }
+            });
+            window.addEventListener('mousemove', (e) => {
+                if (drawing) {
+                    drawAtScreen(e.clientX, e.clientY);
+                } else if (isDragging) {
+                    offsetX = e.clientX - dragStart.x;
+                    offsetY = e.clientY - dragStart.y;
+                    drawFullCanvas();
+                }
+            });
+            window.addEventListener('mouseup', () => {
+                drawing = false;
+                isDragging = false;
+            });
+            canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+            // Колесо мыши (зум)
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                scale = Math.min(20, Math.max(0.5, scale * delta));
+                drawFullCanvas();
+            });
+
+            // Телефон: рисование, перемещение, зум двумя пальцами
+            canvas.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (e.touches.length === 1) {
+                    drawing = true;
+                    drawAtScreen(e.touches[0].clientX, e.touches[0].clientY);
+                    dragStart.x = e.touches[0].clientX - offsetX;
+                    dragStart.y = e.touches[0].clientY - offsetY;
+                    isDragging = true;
+                } else if (e.touches.length === 2) {
+                    drawing = false;
+                    isDragging = false;
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    lastTouchDist = Math.hypot(dx, dy);
+                }
+            });
+            canvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (e.touches.length === 1 && drawing) {
+                    drawAtScreen(e.touches[0].clientX, e.touches[0].clientY);
+                }
+                if (e.touches.length === 1 && isDragging) {
+                    offsetX = e.touches[0].clientX - dragStart.x;
+                    offsetY = e.touches[0].clientY - dragStart.y;
+                    drawFullCanvas();
+                } else if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const newDist = Math.hypot(dx, dy);
+                    if (lastTouchDist > 0) {
+                        const factor = newDist / lastTouchDist;
+                        scale = Math.min(20, Math.max(0.5, scale * factor));
+                        drawFullCanvas();
+                    }
+                    lastTouchDist = newDist;
+                }
+            });
+            canvas.addEventListener('touchend', () => {
+                drawing = false;
+                isDragging = false;
+                lastTouchDist = 0;
+            });
+
+            // Кнопки управления
+            document.getElementById('zoomInBtn').onclick = () => { scale = Math.min(20, scale * 1.2); drawFullCanvas(); };
+            document.getElementById('zoomOutBtn').onclick = () => { scale = Math.max(0.5, scale / 1.2); drawFullCanvas(); };
+            document.getElementById('resetViewBtn').onclick = () => { offsetX = 0; offsetY = 0; scale = 1; drawFullCanvas(); };
+            document.getElementById('clearMyPixelsBtn').onclick = clearMyPixels;
+
+            const picker = document.getElementById('colorPicker');
+            picker.oninput = (e) => {
+                currentColor = e.target.value;
+                document.getElementById('currentColorBox').style.backgroundColor = currentColor;
+            };
+            window.addEventListener('resize', () => { resizeCanvas(); drawFullCanvas(); });
+        }
+
+        // === СТАРТ ===
+        resizeCanvas();
+        loadFromLocalStorage();
+        buildPalette();
+        attachEvents();
+        drawFullCanvas();
+    })();
+</script>
+</body>
+</html>
